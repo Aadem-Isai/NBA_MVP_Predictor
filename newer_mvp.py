@@ -38,7 +38,29 @@ def fetch_bbref_table(url, table_id):
     r.encoding = "utf-8"
     html = re.sub(r"<!--(.*?)-->", r"\1", r.text, flags=re.DOTALL)
 
-    df = pd.read_html(StringIO(html), attrs={"id": table_id}, encoding="utf-8")[0]
+    # Try the exact ID first, then common suffix variants
+    candidate_ids = [table_id, table_id.replace("_stats", ""), f"div_{table_id}"]
+    df = None
+    for tid in candidate_ids:
+        try:
+            df = pd.read_html(StringIO(html), attrs={"id": tid}, encoding="utf-8")[0]
+            break
+        except ValueError:
+            continue
+
+    # Fallback: scan all tables for a Player column (stats pages always have one)
+    if df is None:
+        print(f"  WARNING: table id='{table_id}' not found at {url} — scanning all tables...")
+        all_tables = pd.read_html(StringIO(html), encoding="utf-8")
+        for t in all_tables:
+            t = _flatten_columns(t)
+            if "Player" in t.columns and len(t) > 20:
+                df = t
+                break
+
+    if df is None:
+        raise RuntimeError(f"No usable table found at {url}")
+
     df = _flatten_columns(df)
     df = df.drop(columns=["Rk", "Rank"], errors="ignore")
     df = df.drop(columns=[c for c in df.columns if "Unnamed" in str(c)], errors="ignore")
@@ -107,20 +129,49 @@ def fetch_bbref_standings(url):
 
 def fetch_mvp_winners():
     print("Fetching MVP winner list (names only)...")
-    url  = "https://www.basketball-reference.com/awards/mvp.html"
-    r    = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+    url = "https://www.basketball-reference.com/awards/mvp.html"
+    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
     r.encoding = "utf-8"
     html = re.sub(r"<!--(.*?)-->", r"\1", r.text, flags=re.DOTALL)
 
-    df = pd.read_html(StringIO(html), attrs={"id": "mvp_NBA"}, encoding="utf-8")[0]
+    # Try known table IDs — BBRef has used several over the years
+    candidate_ids = ["mvp_NBA", "mvp", "awards_mvp", "nba_mvp"]
+    df = None
+    for tid in candidate_ids:
+        try:
+            df = pd.read_html(StringIO(html), attrs={"id": tid}, encoding="utf-8")[0]
+            print(f"  Found MVP table using id='{tid}'")
+            break
+        except ValueError:
+            continue
+
+    # Last resort: grab ALL tables and find the one with Season + Player columns
+    if df is None:
+        print("  Named table not found — scanning all tables for Season+Player columns...")
+        all_tables = pd.read_html(StringIO(html), encoding="utf-8")
+        for t in all_tables:
+            t = _flatten_columns(t)
+            if "Season" in t.columns and "Player" in t.columns:
+                df = t
+                print("  Found MVP table by column content")
+                break
+
+    if df is None:
+        raise RuntimeError(
+            "Could not find the MVP table on basketball-reference.com. "
+            "The page structure may have changed significantly — check the URL manually."
+        )
+
     df = _flatten_columns(df)
 
+    # Filter out header rows that repeat inside the table
     if "Season" in df.columns:
         df = df[df["Season"] != "Season"].reset_index(drop=True)
     df = df.dropna(subset=["Season", "Player"])
+
+    # Season column looks like "2024-25" → convert to end year (2025)
     df["Season"] = df["Season"].str.extract(r"(\d{4})-\d+")[0].astype(int) + 1
 
-    # First row per season = the winner
     winners = (
         df.drop_duplicates(subset="Season", keep="first")[["Season", "Player"]]
         .rename(columns={"Player": "MVP_Winner"})
