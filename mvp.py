@@ -11,157 +11,13 @@ import seaborn as sns
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
+import unicodedata
+
+def normalize_name(name):
+    return unicodedata.normalize("NFD", str(name)).encode("ascii", "ignore").decode("utf-8").strip()
+
 
 warnings.filterwarnings("ignore")
-
-# ══════════════════════════════════════════════════════════════════════
-#  SECTION 1 — SCRAPERS
-# ══════════════════════════════════════════════════════════════════════
-
-def _flatten_columns(df):
-    if not isinstance(df.columns, pd.MultiIndex):
-        return df
-    bottom = [col[-1].strip() for col in df.columns]
-    if len(bottom) == len(set(bottom)):
-        df.columns = bottom
-        return df
-    new_cols = []
-    for col in df.columns:
-        top, bot = col[0].strip(), col[-1].strip()
-        new_cols.append(bot if top.lower().startswith("unnamed") else f"{top} {bot}")
-    df.columns = new_cols
-    return df
-
-
-def fetch_bbref_table(url, table_id):
-    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
-    r.encoding = "utf-8"
-    html = re.sub(r"<!--(.*?)-->", r"\1", r.text, flags=re.DOTALL)
-
-    df = pd.read_html(StringIO(html), attrs={"id": table_id}, encoding="utf-8")[0]
-    df = _flatten_columns(df)
-    df = df.drop(columns=["Rk", "Rank"], errors="ignore")
-    df = df.drop(columns=[c for c in df.columns if "Unnamed" in str(c)], errors="ignore")
-    df = df.rename(columns={"Tm": "Team"}, errors="ignore")
-
-    if "Player" in df.columns:
-        df = df[df["Player"] != "Player"].reset_index(drop=True)
-        df = df.dropna(subset=["Player"])
-
-    if "Team" in df.columns:
-        df = df[~((df["Team"] != "TOT") & (df.duplicated(subset=["Player"], keep=False)))]
-
-    numeric_cols = [c for c in df.columns if c not in ["Player", "Pos", "Team", "Age"]]
-    df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
-    return df.reset_index(drop=True)
-
-
-def fetch_bbref_standings(url):
-    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
-    r.encoding = "utf-8"
-    html = re.sub(r"<!--(.*?)-->", r"\1", r.text, flags=re.DOTALL)
-
-    east = _flatten_columns(pd.read_html(StringIO(html), attrs={"id": "confs_standings_E"}, encoding="utf-8")[0])
-    west = _flatten_columns(pd.read_html(StringIO(html), attrs={"id": "confs_standings_W"}, encoding="utf-8")[0])
-
-    def _clean(df):
-        df = df.rename(columns={df.columns[0]: "Team_full"})[["Team_full", "W", "L"]]
-        df = df[pd.to_numeric(df["W"], errors="coerce").notna()].copy()
-        df["W"] = df["W"].astype(int)
-        df["L"] = df["L"].astype(int)
-        df["total_games"] = df["W"] + df["L"]
-        df["Team_full"] = (
-            df["Team_full"]
-            .str.replace(r"\s*\(\d+\)", "", regex=True)
-            .str.replace(r"\*", "", regex=True)
-            .str.strip()
-        )
-        return df
-
-    standings = pd.concat([_clean(east), _clean(west)], ignore_index=True)
-
-    name_to_abbrev = {
-        "Atlanta Hawks": "ATL",          "Boston Celtics": "BOS",
-        "Brooklyn Nets": "BRK",          "Charlotte Hornets": "CHO",
-        "Chicago Bulls": "CHI",          "Cleveland Cavaliers": "CLE",
-        "Dallas Mavericks": "DAL",       "Denver Nuggets": "DEN",
-        "Detroit Pistons": "DET",        "Golden State Warriors": "GSW",
-        "Houston Rockets": "HOU",        "Indiana Pacers": "IND",
-        "Los Angeles Clippers": "LAC",   "Los Angeles Lakers": "LAL",
-        "Memphis Grizzlies": "MEM",      "Miami Heat": "MIA",
-        "Milwaukee Bucks": "MIL",        "Minnesota Timberwolves": "MIN",
-        "New Orleans Pelicans": "NOP",   "New York Knicks": "NYK",
-        "Oklahoma City Thunder": "OKC",  "Orlando Magic": "ORL",
-        "Philadelphia 76ers": "PHI",     "Phoenix Suns": "PHO",
-        "Portland Trail Blazers": "POR", "Sacramento Kings": "SAC",
-        "San Antonio Spurs": "SAS",      "Toronto Raptors": "TOR",
-        "Utah Jazz": "UTA",              "Washington Wizards": "WAS",
-    }
-    standings["Team"] = standings["Team_full"].map(name_to_abbrev)
-    return standings[["Team", "W", "L", "total_games"]]
-
-
-# ══════════════════════════════════════════════════════════════════════
-#  SECTION 2 — MVP WINNER SCRAPER  (names only, zero vote data)
-# ══════════════════════════════════════════════════════════════════════
-
-def fetch_mvp_winners():
-    print("Fetching MVP winner list (names only)...")
-    url  = "https://www.basketball-reference.com/awards/mvp.html"
-    r    = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
-    r.encoding = "utf-8"
-    html = re.sub(r"<!--(.*?)-->", r"\1", r.text, flags=re.DOTALL)
-
-    df = pd.read_html(StringIO(html), attrs={"id": "mvp_NBA"}, encoding="utf-8")[0]
-    df = _flatten_columns(df)
-
-    if "Season" in df.columns:
-        df = df[df["Season"] != "Season"].reset_index(drop=True)
-    df = df.dropna(subset=["Season", "Player"])
-    df["Season"] = df["Season"].str.extract(r"(\d{4})-\d+")[0].astype(int) + 1
-
-    # First row per season = the winner
-    winners = (
-        df.drop_duplicates(subset="Season", keep="first")[["Season", "Player"]]
-        .rename(columns={"Player": "MVP_Winner"})
-        .copy()
-    )
-    print(f"  Got {len(winners)} MVP winners\n")
-    return winners
-
-
-# ══════════════════════════════════════════════════════════════════════
-#  SECTION 3 — PER-SEASON FETCHER
-# ══════════════════════════════════════════════════════════════════════
-
-def fetch_season(year):
-    print(f"  Fetching {year}...")
-    base = f"https://www.basketball-reference.com/leagues/NBA_{year}"
-
-    per_game  = fetch_bbref_table(f"{base}_per_game.html", "per_game_stats")
-    time.sleep(4)
-    advanced  = fetch_bbref_table(f"{base}_advanced.html", "advanced")
-    time.sleep(4)
-    standings = fetch_bbref_standings(f"{base}.html")
-    time.sleep(4)
-
-    merged = per_game.merge(advanced, on=["Player", "Team"], suffixes=("", "_adv"))
-    merged = merged.drop(columns=["Awards_adv", "Awards"], errors="ignore")
-    merged = merged.merge(standings, on="Team", how="left")
-
-    merged["win_pct"]  = merged["W"] / merged["total_games"]
-    # Games played as a fraction of team games (used as a feature, not a hard filter)
-    merged["games_pct"] = merged["G"] / merged["total_games"]
-
-    # Eligibility: lowered to 65% games (catches Embiid-type seasons) + 20 MPG
-    merged = merged[
-        (merged["G"]  >= 0.65 * merged["total_games"]) &
-        (merged["MP"] >= 20.0)
-    ].reset_index(drop=True)
-
-    merged["Season"] = year
-    print(f"    -> {len(merged)} eligible players")
-    return merged
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -195,17 +51,17 @@ def add_percentile_ranks(df):
 # ══════════════════════════════════════════════════════════════════════
 
 SCORE_WEIGHTS = {
-    "VORP":    3.0,
-    "WS":      2.5,
-    "BPM":     2.0,
-    "win_pct": 2.5,
-    "PER":     1.5,
-    "PTS":     1.2,
-    "TS%":     1.3,
+    "VORP":    1.0,
+    "WS":      1.0,
+    "BPM":     1.0,
+    "win_pct": 1.0,
+    "PER":     1.0,
+    "PTS":     1.0,
+    "TS%":     1.0,
     "AST":     1.0,
-    "TRB":     0.8,
-    "STL":     0.7,
-    "BLK":     0.7,
+    "TRB":     1.0,
+    "STL":     1.0,
+    "BLK":     1.0,
 }
 
 
@@ -254,35 +110,33 @@ def build_mvp_score(df, winners):
 # ══════════════════════════════════════════════════════════════════════
 #  SECTION 6 — BUILD DATASETS
 # ══════════════════════════════════════════════════════════════════════
-
 TRAIN_SEASONS  = list(range(2016, 2026))
 PREDICT_SEASON = 2026
 
-mvp_winners = fetch_mvp_winners()
+print("Loading historical seasons from CSV...")
+historical = pd.read_csv("nba_historical_stats.csv")
+historical = historical.drop(columns=['USG%', 'TOV%', 'BLK%', 'ORB%', 'DRB', "TRB%", 'FTr', '3PAr', 'OWS', 'DWS', 'OBPM', 'DBPM', "MP_adv"], errors='ignore')
+print(f"Historical dataset shape: {historical.shape}")
 
-print("Fetching historical seasons...")
-all_seasons = []
-for year in TRAIN_SEASONS:
-    try:
-        all_seasons.append(fetch_season(year))
-    except Exception as e:
-        print(f"  ERROR on {year}: {e}")
+print(f"\nLoading {PREDICT_SEASON} season...")
+current = pd.read_csv("nba_2026_stats.csv")
+print(f"Loaded {len(current)} players for 2026")
 
-historical = pd.concat(all_seasons, ignore_index=True)
-historical = add_percentile_ranks(historical)
-historical = build_mvp_score(historical, mvp_winners)
-
-print(f"\nHistorical dataset shape: {historical.shape}")
-historical.to_csv("nba_historical_stats.csv", index=False)
-
-print(f"\nFetching {PREDICT_SEASON} season...")
-current = fetch_season(PREDICT_SEASON)
-current = add_percentile_ranks(current)
-current["MVP_Score"] = None
-current["is_mvp"]    = None
-current.to_csv("nba_2026_stats.csv", index=False)
-print("Saved nba_2026_stats.csv")
-
+mvp_winners = pd.DataFrame({
+    "Season": [2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025],
+    "MVP_Winner": [
+        "Stephen Curry",
+        "Russell Westbrook",
+        "James Harden",
+        "Giannis Antetokounmpo",
+        "Giannis Antetokounmpo",
+        "Nikola Jokic",
+        "Nikola Jokic",
+        "Joel Embiid",
+        "Nikola Jokic",
+        "Shai Gilgeous-Alexander"
+    ]
+})
 
 # ══════════════════════════════════════════════════════════════════════
 #  SECTION 7 — MODEL
@@ -302,6 +156,8 @@ TARGET     = "MVP_Score"
 
 def prep(df, features, has_target=True):
     df = df.copy()
+    df = df[(df["G"] >= 65) & (df["MP"] >= 20)]  # add this line
+
     if "TOV" in df.columns:
         df["TOV"] = df["TOV"].max() - df["TOV"]
     drop_subset = features + [TARGET] if has_target else features
@@ -329,16 +185,16 @@ X_test_s  = scaler.transform(X_test)
 X_pred_s  = scaler.transform(X_pred)
 
 model = GradientBoostingRegressor(
-    n_estimators=400, learning_rate=0.04,
-    max_depth=4, subsample=0.8,
-    min_samples_leaf=3, random_state=42
+    n_estimators=500, learning_rate=0.05,
+    max_depth=3, subsample=0.8,
+    min_samples_leaf=3, random_state=50
 )
 model.fit(X_train_s, y_train)
 
 # ── Evaluate on 2025 ─────────────────────────────────────────────────
 # Use raw (unclipped) predictions for ranking — clipping causes ties at 1.0
 y_pred_test_raw = model.predict(X_test_s)
-y_pred_test     = np.clip(y_pred_test_raw, 0, 1)
+y_pred_test = y_pred_test_raw
 
 test_df = test_df.copy()
 test_df["Predicted_Score"] = y_pred_test
@@ -351,8 +207,8 @@ r2   = r2_score(y_test, y_pred_test)
 test_df["Pred_Rank"]   = test_df["_raw_pred"].rank(ascending=False, method="first").astype(int)
 test_df["Actual_Rank"] = test_df[TARGET].rank(ascending=False, method="first").astype(int)
 
-predicted_mvp_2025 = test_df.loc[test_df["_raw_pred"].idxmax(), "Player"]
-actual_mvp_2025    = mvp_winners.loc[mvp_winners["Season"] == 2025, "MVP_Winner"].iloc[0]
+predicted_mvp_2025 = normalize_name(test_df.loc[test_df["_raw_pred"].idxmax(), "Player"])
+actual_mvp_2025    = normalize_name(mvp_winners.loc[mvp_winners["Season"] == 2025, "MVP_Winner"].iloc[0])
 
 print("\n" + "=" * 50)
 print(f"  2025 TEST RESULTS")
@@ -377,7 +233,7 @@ for season in season_list:
     if actual_row.empty:
         continue
     actual_winner = actual_row["MVP_Winner"].iloc[0]
-    match = pred_winner == actual_winner
+    match = normalize_name(pred_winner) == normalize_name(actual_winner)
     correct += int(match)
     print(f"  {season}  Predicted: {pred_winner:<28} Actual: {actual_winner:<28} {'✓' if match else '✗'}")
 
@@ -387,7 +243,7 @@ print(f"\n  Train accuracy: {correct}/{total} = {correct/total:.0%}")
 # ── Predict 2026 ─────────────────────────────────────────────────────
 raw_pred_2026 = model.predict(X_pred_s)
 curr_clean = curr_clean.copy()
-curr_clean["Predicted_Score"] = np.clip(raw_pred_2026, 0, 1)
+curr_clean["Predicted_Score"] = raw_pred_2026
 # Rank on raw scores — no ties possible
 curr_clean["MVP_Rank"] = pd.Series(raw_pred_2026).rank(ascending=False, method="first").astype(int).values
 curr_clean = curr_clean.sort_values("MVP_Rank")
