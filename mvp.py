@@ -13,6 +13,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
 import unicodedata
 
+
+print("hello world")
 def normalize_name(name):
     return unicodedata.normalize("NFD", str(name)).encode("ascii", "ignore").decode("utf-8").strip()
 
@@ -21,47 +23,19 @@ warnings.filterwarnings("ignore")
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  SECTION 4 — FEATURE ENGINEERING: within-season percentile ranks
-# ══════════════════════════════════════════════════════════════════════
-#
-#  For each key stat we add a "_pct" column = percentile rank within
-#  that season (0–1, higher = better). This tells the model not just
-#  "this player scored 30 PPG" but "this player was in the 99th
-#  percentile for scoring that season" — capturing relative dominance,
-#  which is what voters actually respond to.
-
-PERCENTILE_COLS = ["PTS", "BPM", "VORP", "WS", "win_pct", "TS%", "PER"]
-
-def add_percentile_ranks(df):
-    df = df.copy()
-    for season, grp in df.groupby("Season"):
-        idx = grp.index
-        for col in PERCENTILE_COLS:
-            if col not in df.columns:
-                continue
-            vals = df.loc[idx, col]
-            pct_col = f"{col}_pct"
-            # percentile rank within season (0–1)
-            df.loc[idx, pct_col] = vals.rank(pct=True)
-    return df
-
-
-# ══════════════════════════════════════════════════════════════════════
 #  SECTION 5 — BUILD TARGET: winner-anchored MVP score
 # ══════════════════════════════════════════════════════════════════════
 
 SCORE_WEIGHTS = {
-    "VORP":    1.0,
-    "WS":      1.0,
-    "BPM":     1.0,
-    "win_pct": 1.0,
-    "PER":     1.0,
-    "PTS":     1.0,
-    "TS%":     1.0,
-    "AST":     1.0,
-    "TRB":     1.0,
-    "STL":     1.0,
-    "BLK":     1.0,
+    "WS":   4.0,
+    "BPM":  2.0,
+    "PER":  2.5,
+    "AST":  0.5,
+    "TRB":  0.3,
+    "STL":  1.1,
+    "BLK":  1.0,
+    "PTS":  3.0,
+    "W":    11,
 }
 
 
@@ -84,12 +58,19 @@ def build_mvp_score(df, winners):
         for col, w in SCORE_WEIGHTS.items():
             if col not in df.columns:
                 continue
-            vals = df.loc[idx, col].fillna(0.0)
+            # Ensure values are numeric, coerce errors to NaN, then fill with 0.0
+            vals = pd.to_numeric(df.loc[idx, col], errors='coerce').fillna(0.0)
             std  = vals.std()
             z    = (vals - vals.mean()) / std if std > 0 else pd.Series(0.0, index=idx)
             season_score += w * z
 
-        # Anchor: winner = 1.0, scale everyone else relative to that
+        if "W" in df.columns:
+            team_wins = df.loc[idx, "W"].fillna(0.0)
+            # Scale: 50 wins = no penalty, below 50 = up to 35% penalty
+            win_multiplier = (team_wins / 50.0).clip(upper=1.0) * 0.35 + 0.65
+            # Now penalizes up to 35% for weak teams
+            season_score = season_score * win_multiplier
+
         if winner_mask.any():
             winner_score = season_score[idx[winner_mask]].iloc[0]
             lo           = season_score.min()
@@ -102,7 +83,7 @@ def build_mvp_score(df, winners):
             lo, hi = season_score.min(), season_score.max()
             season_score = (season_score - lo) / (hi - lo) if hi > lo else season_score * 0.0
 
-        df.loc[idx, "MVP_Score"] = season_score.clip(lower=0.0)
+        df.loc[idx, "MVP_Score"] = season_score
 
     return df
 
@@ -110,54 +91,129 @@ def build_mvp_score(df, winners):
 # ══════════════════════════════════════════════════════════════════════
 #  SECTION 6 — BUILD DATASETS
 # ══════════════════════════════════════════════════════════════════════
-TRAIN_SEASONS  = list(range(2016, 2026))
+TRAIN_SEASONS  = list(range(2016, 2025))
 PREDICT_SEASON = 2026
 
 print("Loading historical seasons from CSV...")
 historical = pd.read_csv("nba_historical_stats.csv")
-historical = historical.drop(columns=['USG%', 'TOV%', 'BLK%', 'ORB%', 'DRB', "TRB%", 'FTr', '3PAr', 'OWS', 'DWS', 'OBPM', 'DBPM', "MP_adv"], errors='ignore')
 print(f"Historical dataset shape: {historical.shape}")
 
 print(f"\nLoading {PREDICT_SEASON} season...")
 current = pd.read_csv("nba_2026_stats.csv")
 print(f"Loaded {len(current)} players for 2026")
 
+# Load standings
+standings = pd.read_csv("nba_standings.csv")
+standings["Team"] = standings["Team"].str.replace(r"\*", "", regex=True).str.strip()
+
+# Filter division headers
+division_names = [
+    "Atlantic Division", "Central Division", "Southeast Division",
+    "Northwest Division", "Pacific Division", "Southwest Division"
+]
+standings = standings[~standings["Team"].isin(division_names)]
+
+# Add abbreviations
+FULL_TO_ABBREV = {
+    "Atlanta Hawks": "ATL", "Boston Celtics": "BOS", "Brooklyn Nets": "BRK",
+    "Charlotte Hornets": "CHA", "Chicago Bulls": "CHI", "Cleveland Cavaliers": "CLE",
+    "Dallas Mavericks": "DAL", "Denver Nuggets": "DEN", "Detroit Pistons": "DET",
+    "Golden State Warriors": "GSW", "Houston Rockets": "HOU", "Indiana Pacers": "IND",
+    "Los Angeles Clippers": "LAC", "Los Angeles Lakers": "LAL", "Memphis Grizzlies": "MEM",
+    "Miami Heat": "MIA", "Milwaukee Bucks": "MIL", "Minnesota Timberwolves": "MIN",
+    "New Orleans Pelicans": "NOP", "New York Knicks": "NYK", "Oklahoma City Thunder": "OKC",
+    "Orlando Magic": "ORL", "Philadelphia 76ers": "PHI", "Phoenix Suns": "PHO",
+    "Portland Trail Blazers": "POR", "Sacramento Kings": "SAC", "San Antonio Spurs": "SAS",
+    "Toronto Raptors": "TOR", "Utah Jazz": "UTA", "Washington Wizards": "WAS",
+}
+standings["Team_Abbrev"] = standings["Team"].map(FULL_TO_ABBREV)
+
+# Add 2026 standings BEFORE merging
+standings_2026 = pd.DataFrame({
+    "Team": [
+        "Oklahoma City Thunder", "Cleveland Cavaliers", "Boston Celtics",
+        "New York Knicks", "Memphis Grizzlies", "Los Angeles Lakers",
+        "Golden State Warriors", "Houston Rockets", "Denver Nuggets",
+        "Minnesota Timberwolves", "Los Angeles Clippers", "Indiana Pacers",
+        "Dallas Mavericks", "Miami Heat", "Milwaukee Bucks",
+        "Sacramento Kings", "Phoenix Suns", "San Antonio Spurs",
+        "New Orleans Pelicans", "Utah Jazz", "Toronto Raptors",
+        "Atlanta Hawks", "Orlando Magic", "Chicago Bulls",
+        "Brooklyn Nets", "Charlotte Hornets", "Philadelphia 76ers",
+        "Detroit Pistons", "Portland Trail Blazers", "Washington Wizards"
+    ],
+    "W": [68, 64, 61, 55, 49, 48, 44, 52, 45, 50,
+          40, 50, 43, 42, 38, 40, 35, 34, 30, 22,
+          25, 38, 41, 28, 20, 30, 24, 42, 20, 15]
+})
+standings_2026["Season"] = 2026
+standings
+standings_2026["Team_Abbrev"] = standings_2026["Team"].map(FULL_TO_ABBREV)
+standings = pd.concat([standings, standings_2026], ignore_index=True)
+
+# Verify
+unmapped = standings[standings["Team_Abbrev"].isna()]["Team"].unique()
+print("Unmapped teams:", unmapped)
+
+# Fix CHO before merging
+current["Team"] = current["Team"].replace({"CHO": "CHA"})
+
+# Drop any existing W column to prevent W_x/W_y collision
+historical = historical.drop(columns=["W"], errors="ignore")
+current    = current.drop(columns=["W"], errors="ignore")
+
+# NOW merge
+historical = historical.merge(
+    standings[["Season", "Team_Abbrev", "W"]],
+    left_on=["Season", "Team"],
+    right_on=["Season", "Team_Abbrev"],
+    how="left"
+).drop(columns="Team_Abbrev")
+
+# Force 'W' to numeric and print non-numeric values
+non_numeric_hist = historical[~historical['W'].apply(lambda x: str(x).replace('.', '', 1).isdigit()) & ~historical['W'].isna()]
+historical['W'] = pd.to_numeric(historical['W'], errors='coerce')
+
+current = current.merge(
+    standings[["Season", "Team_Abbrev", "W"]],
+    left_on=["Season", "Team"],
+    right_on=["Season", "Team_Abbrev"],
+    how="left"
+).drop(columns="Team_Abbrev")
+
+# Force 'W' to numeric and print non-numeric values
+non_numeric_curr = current[~current['W'].apply(lambda x: str(x).replace('.', '', 1).isdigit()) & ~current['W'].isna()]
+current['W'] = pd.to_numeric(current['W'], errors='coerce')
+
+print(current[current["Player"].isin(["Nikola Jokić", "Shai Gilgeous-Alexander"])][["Player", "Team", "W"]])
+
 mvp_winners = pd.DataFrame({
     "Season": [2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025],
     "MVP_Winner": [
-        "Stephen Curry",
-        "Russell Westbrook",
-        "James Harden",
-        "Giannis Antetokounmpo",
-        "Giannis Antetokounmpo",
-        "Nikola Jokic",
-        "Nikola Jokic",
-        "Joel Embiid",
-        "Nikola Jokic",
-        "Shai Gilgeous-Alexander"
+        "Stephen Curry", "Russell Westbrook", "James Harden",
+        "Giannis Antetokounmpo", "Giannis Antetokounmpo", "Nikola Jokic",
+        "Nikola Jokic", "Joel Embiid", "Nikola Jokic", "Shai Gilgeous-Alexander"
     ]
 })
+
+historical = build_mvp_score(historical, mvp_winners)
 
 # ══════════════════════════════════════════════════════════════════════
 #  SECTION 7 — MODEL
 # ══════════════════════════════════════════════════════════════════════
 
-PCT_FEATURES = [f"{c}_pct" for c in PERCENTILE_COLS]
-
 SCORING    = ["PTS", "FG%", "3P%", "FT%", "TS%"]
 PLAYMAKING = ["AST", "TOV"]
 DEFENSE    = ["TRB", "STL", "BLK"]
-EFFICIENCY = ["PER", "WS", "WS/48", "BPM", "VORP"]
-TEAM       = ["win_pct"]
-USAGE      = ["MP", "G", "games_pct"]   # games_pct lets model learn availability signal
-FEATURES   = SCORING + PLAYMAKING + DEFENSE + EFFICIENCY + TEAM + USAGE + PCT_FEATURES
+EFFICIENCY = ["PER", "WS/48", "BPM", "VORP"]
+USAGE      = ["MP", "G", "W"]  
+FEATURES   = SCORING + PLAYMAKING + DEFENSE + EFFICIENCY + USAGE
 TARGET     = "MVP_Score"
 
 
 def prep(df, features, has_target=True):
     df = df.copy()
-    df = df[(df["G"] >= 65) & (df["MP"] >= 20)]  # add this line
-
+    df = df[(df["G"] >= 64) & (df["MP"] >= 20) & (df["PTS"] >= 15)]
     if "TOV" in df.columns:
         df["TOV"] = df["TOV"].max() - df["TOV"]
     drop_subset = features + [TARGET] if has_target else features
@@ -185,25 +241,25 @@ X_test_s  = scaler.transform(X_test)
 X_pred_s  = scaler.transform(X_pred)
 
 model = GradientBoostingRegressor(
-    n_estimators=500, learning_rate=0.05,
-    max_depth=3, subsample=0.8,
-    min_samples_leaf=3, random_state=50
+    n_estimators=400, learning_rate=0.04,
+    max_depth=5, subsample=0.8,
+    min_samples_leaf=3, random_state=42
 )
 model.fit(X_train_s, y_train)
 
 # ── Evaluate on 2025 ─────────────────────────────────────────────────
-# Use raw (unclipped) predictions for ranking — clipping causes ties at 1.0
+# Use raw (unclipped) predictions for ranking 
 y_pred_test_raw = model.predict(X_test_s)
 y_pred_test = y_pred_test_raw
 
 test_df = test_df.copy()
 test_df["Predicted_Score"] = y_pred_test
-test_df["_raw_pred"]       = y_pred_test_raw   # used for tie-free ranking
+test_df["_raw_pred"]       = y_pred_test_raw
 
 rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
 r2   = r2_score(y_test, y_pred_test)
 
-# Rank on raw predictions — guarantees no ties
+# Rank on raw predictions
 test_df["Pred_Rank"]   = test_df["_raw_pred"].rank(ascending=False, method="first").astype(int)
 test_df["Actual_Rank"] = test_df[TARGET].rank(ascending=False, method="first").astype(int)
 
@@ -235,7 +291,7 @@ for season in season_list:
     actual_winner = actual_row["MVP_Winner"].iloc[0]
     match = normalize_name(pred_winner) == normalize_name(actual_winner)
     correct += int(match)
-    print(f"  {season}  Predicted: {pred_winner:<28} Actual: {actual_winner:<28} {'✓' if match else '✗'}")
+    print(f"  {season}  Predicted: {pred_winner:<28} Actual: {actual_winner:<28} {'✓' if match else '✗'} Predicted Score: {max(raw_preds):.4f}")
 
 total = len(season_list)
 print(f"\n  Train accuracy: {correct}/{total} = {correct/total:.0%}")
@@ -244,13 +300,13 @@ print(f"\n  Train accuracy: {correct}/{total} = {correct/total:.0%}")
 raw_pred_2026 = model.predict(X_pred_s)
 curr_clean = curr_clean.copy()
 curr_clean["Predicted_Score"] = raw_pred_2026
-# Rank on raw scores — no ties possible
+# Rank on raw scores
 curr_clean["MVP_Rank"] = pd.Series(raw_pred_2026).rank(ascending=False, method="first").astype(int).values
 curr_clean = curr_clean.sort_values("MVP_Rank")
 
 print("\nTop 10 Predicted 2026 MVP Candidates:")
 print(
-    curr_clean[["MVP_Rank", "Player", "Team", "PTS", "win_pct", "Predicted_Score"]]
+    curr_clean[["MVP_Rank", "Player", "Team", "PTS","TRB", "AST", "Predicted_Score"]]
     .head(10)
     .to_string(index=False)
 )
@@ -316,7 +372,7 @@ for i, (_, row) in enumerate(top10[::-1].iterrows()):
 
 # ── Plot 4: Correlation heatmap ───────────────────────────────────────
 ax4 = fig.add_subplot(3, 2, 4)
-KEY_FEATS = ["PTS", "AST", "TRB", "WS", "BPM", "VORP", "win_pct", "MVP_Score"]
+KEY_FEATS = ["PTS", "AST", "TRB", "WS", "BPM", "VORP", "MVP_Score"]
 corr_data = historical[KEY_FEATS].dropna().corr()
 mask = np.triu(np.ones_like(corr_data, dtype=bool))
 sns.heatmap(corr_data, mask=mask, annot=True, fmt=".2f", cmap="coolwarm",
@@ -352,21 +408,6 @@ ax5.set_xlabel("Season End Year")
 ax5.set_ylabel("MVP Score (winner anchored at 1.0)")
 ax5.set_ylim(0, 1.15)
 ax5.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-
-# ── Plot 6: Predicted vs Score Rank — 2025 ───────────────────────────
-ax6 = fig.add_subplot(3, 2, 6)
-top10_ranks = test_df.nsmallest(10, "Pred_Rank")[["Player", "Pred_Rank", "Actual_Rank"]].sort_values("Pred_Rank")
-x = np.arange(len(top10_ranks))
-w = 0.35
-ax6.bar(x - w/2, top10_ranks["Pred_Rank"],   w, label="Predicted Rank", color=BLUE, alpha=0.85)
-ax6.bar(x + w/2, top10_ranks["Actual_Rank"], w, label="Score Rank",     color=RED,  alpha=0.85)
-ax6.set_xticks(x)
-ax6.set_xticklabels([p.split(" ")[-1] for p in top10_ranks["Player"]],
-                    rotation=35, ha="right", fontsize=9)
-ax6.invert_yaxis()
-ax6.set_ylabel("Rank  (1 = best)")
-ax6.set_title("Predicted vs Score Rank — 2025 Season", fontweight="bold", fontsize=13)
-ax6.legend()
 
 plt.tight_layout(rect=[0, 0, 1, 0.97])
 plt.savefig("mvp_model_results.png", dpi=150, bbox_inches="tight")
