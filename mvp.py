@@ -12,6 +12,8 @@ from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
 import unicodedata
+import shap 
+from math import pi
 
 
 print("hello world")
@@ -409,7 +411,63 @@ ax5.set_ylabel("MVP Score (winner anchored at 1.0)")
 ax5.set_ylim(0, 1.15)
 ax5.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 
+
 plt.tight_layout(rect=[0, 0, 1, 0.97])
 plt.savefig("mvp_model_results.png", dpi=150, bbox_inches="tight")
 plt.show()
-print("\nSaved -> mvp_model_results.png")
+
+# ══════════════════════════════════════════════════════════════════════
+#  SECTION 9 — ADVANCED VISUALS (SHAP & RADAR)
+# ══════════════════════════════════════════════════════════════════════
+
+# ── 1. SHAP Summary Plot ──────────────────────────────────────────────
+print("\nGenerating SHAP Summary Plot...")
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(X_test_s)
+
+plt.figure(figsize=(10, 6))
+plt.title("SHAP Summary Plot (Feature Impact on MVP Score)", fontsize=14, fontweight="bold", pad=20)
+# SHAP creates its own plot, show=False prevents it from immediately rendering so we can save it
+shap.summary_plot(shap_values, X_test, feature_names=FEATURES, show=False)
+plt.savefig("mvp_shap_summary.png", dpi=150, bbox_inches="tight")
+plt.show()
+print("Saved -> mvp_shap_summary.png")
+
+
+# ── 2. Radar Chart for Top 3 Predicted 2026 Candidates ────────────────
+print("\nGenerating Radar Chart...")
+RADAR_STATS = ["PTS", "TRB", "AST", "TS%", "WS/48", "BPM"]
+
+# We need stats to be strictly positive and scaled between 0-1 for a radar chart
+radar_df = curr_clean.copy()
+for stat in RADAR_STATS:
+    lo, hi = radar_df[stat].min(), radar_df[stat].max()
+    radar_df[stat] = (radar_df[stat] - lo) / (hi - lo) if hi > lo else 0.0
+
+top_3_players = radar_df.head(3)["Player"].tolist()
+
+# Math setup for polar plot angles
+N = len(RADAR_STATS)
+angles = [n / float(N) * 2 * pi for n in range(N)]
+angles += angles[:1] # Close the loop
+
+fig, ax = plt.subplots(figsize=(8, 8), subplot_kw=dict(polar=True))
+colors = [GOLD, BLUE, RED]
+
+for i, player in enumerate(top_3_players):
+    player_data = radar_df[radar_df["Player"] == player][RADAR_STATS].iloc[0].tolist()
+    player_data += player_data[:1] # Close the loop
+    
+    ax.plot(angles, player_data, linewidth=2, linestyle='solid', label=player, color=colors[i])
+    ax.fill(angles, player_data, color=colors[i], alpha=0.15)
+
+# Formatting the radar chart
+plt.xticks(angles[:-1], RADAR_STATS, size=11, fontweight="bold")
+ax.set_yticklabels([]) # Hide radial ticks
+ax.spines['polar'].set_visible(False)
+plt.title("Top 3 MVP Candidates: Normalized Stat Profile", size=15, fontweight="bold", y=1.05)
+plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
+
+plt.savefig("mvp_radar_chart.png", dpi=150, bbox_inches="tight")
+plt.show()
+print("Saved -> mvp_radar_chart.png")

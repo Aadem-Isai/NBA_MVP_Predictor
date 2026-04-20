@@ -148,13 +148,16 @@ def fetch_mvp_winners():
     # Last resort: grab ALL tables and find the one with Season + Player columns
     if df is None:
         print("  Named table not found — scanning all tables for Season+Player columns...")
-        all_tables = pd.read_html(StringIO(html), encoding="utf-8")
-        for t in all_tables:
-            t = _flatten_columns(t)
-            if "Season" in t.columns and "Player" in t.columns:
-                df = t
-                print("  Found MVP table by column content")
-                break
+        try:
+            all_tables = pd.read_html(StringIO(html), encoding="utf-8")
+            for t in all_tables:
+                t = _flatten_columns(t)
+                if "Season" in t.columns and "Player" in t.columns:
+                    df = t
+                    print("  Found MVP table by column content")
+                    break
+        except ValueError:
+            print("  ERROR: pd.read_html() found no tables in the HTML")
 
     if df is None:
         raise RuntimeError(
