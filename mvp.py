@@ -23,19 +23,19 @@ warnings.filterwarnings("ignore")
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  SECTION 5 — BUILD TARGET: winner-anchored MVP score
+#  SECTION 1 — BUILD TARGET: MVP score
 # ══════════════════════════════════════════════════════════════════════
 
 SCORE_WEIGHTS = {
-    "WS":   4.0,
-    "BPM":  2.0,
+    "WS":   5.0,
+    "BPM":  3.0,
     "PER":  2.5,
     "AST":  0.5,
     "TRB":  0.3,
     "STL":  1.1,
     "BLK":  1.0,
     "PTS":  3.0,
-    "W":    11,
+    "W":    17,
 }
 
 
@@ -142,9 +142,9 @@ standings_2026 = pd.DataFrame({
         "Brooklyn Nets", "Charlotte Hornets", "Philadelphia 76ers",
         "Detroit Pistons", "Portland Trail Blazers", "Washington Wizards"
     ],
-    "W": [68, 64, 61, 55, 49, 48, 44, 52, 45, 50,
-          40, 50, 43, 42, 38, 40, 35, 34, 30, 22,
-          25, 38, 41, 28, 20, 30, 24, 42, 20, 15]
+    "W": [64, 52, 56, 53, 25, 53, 37, 52, 54, 49,
+          42, 19, 26, 43, 32, 22, 45, 62, 26, 22,
+          46, 46, 45, 31, 20, 44, 45, 60, 42, 17]
 })
 standings_2026["Season"] = 2026
 standings
