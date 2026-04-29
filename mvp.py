@@ -12,7 +12,7 @@ from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
 import unicodedata
-import shap 
+
 from math import pi
 
 
@@ -37,7 +37,7 @@ SCORE_WEIGHTS = {
     "STL":  1.1,
     "BLK":  1.0,
     "PTS":  3.0,
-    "W":    17,
+    "W":    17.0,
 }
 
 
