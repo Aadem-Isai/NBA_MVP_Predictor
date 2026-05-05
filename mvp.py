@@ -17,9 +17,9 @@ from math import pi
 
 
 print("hello world")
+
 def normalize_name(name):
     return unicodedata.normalize("NFD", str(name)).encode("ascii", "ignore").decode("utf-8").strip()
-
 
 warnings.filterwarnings("ignore")
 
@@ -40,7 +40,7 @@ SCORE_WEIGHTS = {
     "W":    17.0,
 }
 
-
+# Builds the MVP Score based on a weighted combination of stats, normalized within each season, and anchored so the actual MVP has a score of 1.0. Also applies a team wins multiplier to penalize players on weak teams.
 def build_mvp_score(df, winners):
     df = df.copy()
     df["MVP_Score"] = 0.0
@@ -91,7 +91,7 @@ def build_mvp_score(df, winners):
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  SECTION 6 — BUILD DATASETS
+#  SECTION 2 — BUILD DATASETS
 # ══════════════════════════════════════════════════════════════════════
 TRAIN_SEASONS  = list(range(2016, 2025))
 PREDICT_SEASON = 2026
@@ -201,7 +201,7 @@ mvp_winners = pd.DataFrame({
 historical = build_mvp_score(historical, mvp_winners)
 
 # ══════════════════════════════════════════════════════════════════════
-#  SECTION 7 — MODEL
+#  SECTION 3 — MODEL
 # ══════════════════════════════════════════════════════════════════════
 
 SCORING    = ["PTS", "FG%", "3P%", "FT%", "TS%"]
@@ -212,7 +212,7 @@ USAGE      = ["MP", "G", "W"]
 FEATURES   = SCORING + PLAYMAKING + DEFENSE + EFFICIENCY + USAGE
 TARGET     = "MVP_Score"
 
-
+# Prep and Filter datsets: only players with at least 64 games, 20 minutes per game, and 15 points per game. Also invert TOV so that lower is better, and only drop rows missing features that actually exist in the df (some seasons may not have all features).
 def prep(df, features, has_target=True):
     df = df.copy()
     df = df[(df["G"] >= 64) & (df["MP"] >= 20) & (df["PTS"] >= 15)]
@@ -315,7 +315,7 @@ print(
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  SECTION 8 — VISUALS
+#  SECTION 4 — VISUALS
 # ══════════════════════════════════════════════════════════════════════
 
 sns.set_theme(style="darkgrid", palette="muted")
